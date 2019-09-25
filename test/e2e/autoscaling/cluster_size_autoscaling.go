@@ -41,17 +41,17 @@ import (
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
+	"k8s.io/klog"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/test/e2e/framework"
-	e2elog "k8s.io/kubernetes/test/e2e/framework/log"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
+	e2epv "k8s.io/kubernetes/test/e2e/framework/pv"
 	"k8s.io/kubernetes/test/e2e/scheduling"
 	testutils "k8s.io/kubernetes/test/utils"
 	imageutils "k8s.io/kubernetes/test/utils/image"
 
 	"github.com/onsi/ginkgo"
 	"github.com/onsi/gomega"
-	"k8s.io/klog"
 )
 
 const (
@@ -210,7 +210,7 @@ var _ = SIGDescribe("Cluster size autoscaling [Slow]", func() {
 	ginkgo.It(fmt.Sprintf("Should scale up GPU pool from 0 [GpuType:%s] [Feature:ClusterSizeAutoscalingGpu]", gpuType), func() {
 		framework.SkipUnlessProviderIs("gke")
 		if gpuType == "" {
-			e2elog.Failf("TEST_GPU_TYPE not defined")
+			framework.Failf("TEST_GPU_TYPE not defined")
 			return
 		}
 
@@ -237,7 +237,7 @@ var _ = SIGDescribe("Cluster size autoscaling [Slow]", func() {
 	ginkgo.It(fmt.Sprintf("Should scale up GPU pool from 1 [GpuType:%s] [Feature:ClusterSizeAutoscalingGpu]", gpuType), func() {
 		framework.SkipUnlessProviderIs("gke")
 		if gpuType == "" {
-			e2elog.Failf("TEST_GPU_TYPE not defined")
+			framework.Failf("TEST_GPU_TYPE not defined")
 			return
 		}
 
@@ -267,7 +267,7 @@ var _ = SIGDescribe("Cluster size autoscaling [Slow]", func() {
 	ginkgo.It(fmt.Sprintf("Should not scale GPU pool up if pod does not require GPUs [GpuType:%s] [Feature:ClusterSizeAutoscalingGpu]", gpuType), func() {
 		framework.SkipUnlessProviderIs("gke")
 		if gpuType == "" {
-			e2elog.Failf("TEST_GPU_TYPE not defined")
+			framework.Failf("TEST_GPU_TYPE not defined")
 			return
 		}
 
@@ -296,7 +296,7 @@ var _ = SIGDescribe("Cluster size autoscaling [Slow]", func() {
 	ginkgo.It(fmt.Sprintf("Should scale down GPU pool from 1 [GpuType:%s] [Feature:ClusterSizeAutoscalingGpu]", gpuType), func() {
 		framework.SkipUnlessProviderIs("gke")
 		if gpuType == "" {
-			e2elog.Failf("TEST_GPU_TYPE not defined")
+			framework.Failf("TEST_GPU_TYPE not defined")
 			return
 		}
 
@@ -466,14 +466,14 @@ var _ = SIGDescribe("Cluster size autoscaling [Slow]", func() {
 		framework.SkipUnlessProviderIs("gce", "gke")
 
 		volumeLabels := labels.Set{
-			framework.VolumeSelectorKey: f.Namespace.Name,
+			e2epv.VolumeSelectorKey: f.Namespace.Name,
 		}
 		selector := metav1.SetAsLabelSelector(volumeLabels)
 
 		ginkgo.By("creating volume & pvc")
-		diskName, err := framework.CreatePDWithRetry()
+		diskName, err := e2epv.CreatePDWithRetry()
 		framework.ExpectNoError(err)
-		pvConfig := framework.PersistentVolumeConfig{
+		pvConfig := e2epv.PersistentVolumeConfig{
 			NamePrefix: "gce-",
 			Labels:     volumeLabels,
 			PVSource: v1.PersistentVolumeSource{
@@ -486,23 +486,23 @@ var _ = SIGDescribe("Cluster size autoscaling [Slow]", func() {
 			Prebind: nil,
 		}
 		emptyStorageClass := ""
-		pvcConfig := framework.PersistentVolumeClaimConfig{
+		pvcConfig := e2epv.PersistentVolumeClaimConfig{
 			Selector:         selector,
 			StorageClassName: &emptyStorageClass,
 		}
 
-		pv, pvc, err := framework.CreatePVPVC(c, pvConfig, pvcConfig, f.Namespace.Name, false)
+		pv, pvc, err := e2epv.CreatePVPVC(c, pvConfig, pvcConfig, f.Namespace.Name, false)
 		framework.ExpectNoError(err)
-		framework.ExpectNoError(framework.WaitOnPVandPVC(c, f.Namespace.Name, pv, pvc))
+		framework.ExpectNoError(e2epv.WaitOnPVandPVC(c, f.Namespace.Name, pv, pvc))
 
 		defer func() {
-			errs := framework.PVPVCCleanup(c, f.Namespace.Name, pv, pvc)
+			errs := e2epv.PVPVCCleanup(c, f.Namespace.Name, pv, pvc)
 			if len(errs) > 0 {
-				e2elog.Failf("failed to delete PVC and/or PV. Errors: %v", utilerrors.NewAggregate(errs))
+				framework.Failf("failed to delete PVC and/or PV. Errors: %v", utilerrors.NewAggregate(errs))
 			}
 			pv, pvc = nil, nil
 			if diskName != "" {
-				framework.ExpectNoError(framework.DeletePDWithRetry(diskName))
+				framework.ExpectNoError(e2epv.DeletePDWithRetry(diskName))
 			}
 		}()
 
@@ -574,8 +574,8 @@ var _ = SIGDescribe("Cluster size autoscaling [Slow]", func() {
 			framework.AddOrUpdateLabelOnNode(c, node, labelKey, labelValue)
 		}
 
-		scheduling.CreateNodeSelectorPods(f, "node-selector", minSize+1, map[string]string{labelKey: labelValue}, false)
-
+		err = scheduling.CreateNodeSelectorPods(f, "node-selector", minSize+1, map[string]string{labelKey: labelValue}, false)
+		framework.ExpectNoError(err)
 		ginkgo.By("Waiting for new node to appear and annotating it")
 		framework.WaitForGroupSize(minMig, int32(minSize+1))
 		// Verify that cluster size is increased
@@ -920,10 +920,10 @@ var _ = SIGDescribe("Cluster size autoscaling [Slow]", func() {
 				defer framework.DeleteRCAndWaitForGC(f.ClientSet, f.Namespace.Name, "memory-reservation")
 				time.Sleep(scaleUpTimeout)
 				currentNodes := framework.GetReadySchedulableNodesOrDie(f.ClientSet)
-				e2elog.Logf("Currently available nodes: %v, nodes available at the start of test: %v, disabled nodes: %v", len(currentNodes.Items), len(nodes.Items), nodesToBreakCount)
+				framework.Logf("Currently available nodes: %v, nodes available at the start of test: %v, disabled nodes: %v", len(currentNodes.Items), len(nodes.Items), nodesToBreakCount)
 				framework.ExpectEqual(len(currentNodes.Items), len(nodes.Items)-nodesToBreakCount)
 				status, err := getClusterwideStatus(c)
-				e2elog.Logf("Clusterwide status: %v", status)
+				framework.Logf("Clusterwide status: %v", status)
 				framework.ExpectNoError(err)
 				framework.ExpectEqual(status, "Unhealthy")
 			}
@@ -1231,7 +1231,7 @@ func getPoolNodes(f *framework.Framework, poolName string) []*v1.Node {
 	nodes := make([]*v1.Node, 0, 1)
 	nodeList, err := e2enode.GetReadyNodesIncludingTainted(f.ClientSet)
 	if err != nil {
-		e2elog.Logf("Unexpected error occurred: %v", err)
+		framework.Logf("Unexpected error occurred: %v", err)
 	}
 	// TODO: write a wrapper for ExpectNoErrorWithOffset()
 	framework.ExpectNoErrorWithOffset(0, err)
@@ -1308,7 +1308,7 @@ func reserveMemory(f *framework.Framework, id string, replicas, megabytes int, e
 			return framework.DeleteRCAndWaitForGC(f.ClientSet, f.Namespace.Name, id)
 		}
 	}
-	e2elog.Failf("Failed to reserve memory within timeout")
+	framework.Failf("Failed to reserve memory within timeout")
 	return nil
 }
 
@@ -1879,7 +1879,7 @@ func addKubeSystemPdbs(f *framework.Framework) (func(), error) {
 			}
 		}
 		if finalErr != nil {
-			e2elog.Failf("Error during PodDisruptionBudget cleanup: %v", finalErr)
+			framework.Failf("Error during PodDisruptionBudget cleanup: %v", finalErr)
 		}
 	}
 

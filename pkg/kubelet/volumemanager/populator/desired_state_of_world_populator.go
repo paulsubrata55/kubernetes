@@ -296,12 +296,19 @@ func (dswp *desiredStateOfWorldPopulator) processPodVolumes(
 	}
 
 	allVolumesAdded := true
-	mountsMap, devicesMap := dswp.makeVolumeMap(pod.Spec.Containers)
+	mounts, devices := util.GetPodVolumeNames(pod)
 
+	expandInUsePV := utilfeature.DefaultFeatureGate.Enabled(features.ExpandInUsePersistentVolumes)
 	// Process volume spec for each volume defined in pod
 	for _, podVolume := range pod.Spec.Volumes {
+		if !mounts.Has(podVolume.Name) && !devices.Has(podVolume.Name) {
+			// Volume is not used in the pod, ignore it.
+			klog.V(4).Infof("Skipping unused volume %q for pod %q", podVolume.Name, format.Pod(pod))
+			continue
+		}
+
 		pvc, volumeSpec, volumeGidValue, err :=
-			dswp.createVolumeSpec(podVolume, pod.Name, pod.Namespace, mountsMap, devicesMap)
+			dswp.createVolumeSpec(podVolume, pod.Name, pod.Namespace, mounts, devices)
 		if err != nil {
 			klog.Errorf(
 				"Error processing volume %q for pod %q: %v",
@@ -325,15 +332,15 @@ func (dswp *desiredStateOfWorldPopulator) processPodVolumes(
 				err)
 			dswp.desiredStateOfWorld.AddErrorToPod(uniquePodName, err.Error())
 			allVolumesAdded = false
+		} else {
+			klog.V(4).Infof(
+				"Added volume %q (volSpec=%q) for pod %q to desired state.",
+				podVolume.Name,
+				volumeSpec.Name(),
+				uniquePodName)
 		}
 
-		klog.V(4).Infof(
-			"Added volume %q (volSpec=%q) for pod %q to desired state.",
-			podVolume.Name,
-			volumeSpec.Name(),
-			uniquePodName)
-
-		if utilfeature.DefaultFeatureGate.Enabled(features.ExpandInUsePersistentVolumes) {
+		if expandInUsePV {
 			dswp.checkVolumeFSResize(pod, podVolume, pvc, volumeSpec,
 				uniquePodName, mountedVolumesForPod, processedVolumesForFSResize)
 		}
@@ -377,22 +384,15 @@ func (dswp *desiredStateOfWorldPopulator) checkVolumeFSResize(
 		// or online resize in subsequent loop(after we confirm it has been mounted).
 		return
 	}
-	fsVolume, err := util.CheckVolumeModeFilesystem(volumeSpec)
-	if err != nil {
-		klog.Errorf("Check volume mode failed for volume %s(OuterVolumeSpecName %s): %v",
-			uniqueVolumeName, podVolume.Name, err)
-		return
-	}
-	if !fsVolume {
-		klog.V(5).Infof("Block mode volume needn't to check file system resize request")
-		return
-	}
 	if processedVolumesForFSResize.Has(string(uniqueVolumeName)) {
 		// File system resize operation is a global operation for volume,
 		// so we only need to check it once if more than one pod use it.
 		return
 	}
-	if mountedReadOnlyByPod(podVolume, pod) {
+	// volumeSpec.ReadOnly is the value that determines if volume could be formatted when being mounted.
+	// This is the same flag that determines filesystem resizing behaviour for offline resizing and hence
+	// we should use it here. This value comes from Pod.spec.volumes.persistentVolumeClaim.readOnly.
+	if volumeSpec.ReadOnly {
 		// This volume is used as read only by this pod, we don't perform resize for read only volumes.
 		klog.V(5).Infof("Skip file system resize check for volume %s in pod %s/%s "+
 			"as the volume is mounted as readonly", podVolume.Name, pod.Namespace, pod.Name)
@@ -402,32 +402,6 @@ func (dswp *desiredStateOfWorldPopulator) checkVolumeFSResize(
 		dswp.actualStateOfWorld.MarkFSResizeRequired(uniqueVolumeName, uniquePodName)
 	}
 	processedVolumesForFSResize.Insert(string(uniqueVolumeName))
-}
-
-func mountedReadOnlyByPod(podVolume v1.Volume, pod *v1.Pod) bool {
-	if podVolume.PersistentVolumeClaim.ReadOnly {
-		return true
-	}
-	for _, container := range pod.Spec.InitContainers {
-		if !mountedReadOnlyByContainer(podVolume.Name, &container) {
-			return false
-		}
-	}
-	for _, container := range pod.Spec.Containers {
-		if !mountedReadOnlyByContainer(podVolume.Name, &container) {
-			return false
-		}
-	}
-	return true
-}
-
-func mountedReadOnlyByContainer(volumeName string, container *v1.Container) bool {
-	for _, volumeMount := range container.VolumeMounts {
-		if volumeMount.Name == volumeName && !volumeMount.ReadOnly {
-			return false
-		}
-	}
-	return true
 }
 
 func getUniqueVolumeName(
@@ -481,11 +455,11 @@ func (dswp *desiredStateOfWorldPopulator) deleteProcessedPod(
 	delete(dswp.pods.processedPods, podName)
 }
 
-// createVolumeSpec creates and returns a mutatable volume.Spec object for the
+// createVolumeSpec creates and returns a mutable volume.Spec object for the
 // specified volume. It dereference any PVC to get PV objects, if needed.
 // Returns an error if unable to obtain the volume at this time.
 func (dswp *desiredStateOfWorldPopulator) createVolumeSpec(
-	podVolume v1.Volume, podName string, podNamespace string, mountsMap map[string]bool, devicesMap map[string]bool) (*v1.PersistentVolumeClaim, *volume.Spec, string, error) {
+	podVolume v1.Volume, podName string, podNamespace string, mounts, devices sets.String) (*v1.PersistentVolumeClaim, *volume.Spec, string, error) {
 	if pvcSource :=
 		podVolume.VolumeSource.PersistentVolumeClaim; pvcSource != nil {
 		klog.V(5).Infof(
@@ -538,14 +512,14 @@ func (dswp *desiredStateOfWorldPopulator) createVolumeSpec(
 				return nil, nil, "", err
 			}
 			// Error if a container has volumeMounts but the volumeMode of PVC isn't Filesystem
-			if mountsMap[podVolume.Name] && volumeMode != v1.PersistentVolumeFilesystem {
+			if mounts.Has(podVolume.Name) && volumeMode != v1.PersistentVolumeFilesystem {
 				return nil, nil, "", fmt.Errorf(
 					"volume %s has volumeMode %s, but is specified in volumeMounts",
 					podVolume.Name,
 					volumeMode)
 			}
 			// Error if a container has volumeDevices but the volumeMode of PVC isn't Block
-			if devicesMap[podVolume.Name] && volumeMode != v1.PersistentVolumeBlock {
+			if devices.Has(podVolume.Name) && volumeMode != v1.PersistentVolumeBlock {
 				return nil, nil, "", fmt.Errorf(
 					"volume %s has volumeMode %s, but is specified in volumeDevices",
 					podVolume.Name,
@@ -626,28 +600,6 @@ func (dswp *desiredStateOfWorldPopulator) getPVSpec(
 
 	volumeGidValue := getPVVolumeGidAnnotationValue(pv)
 	return volume.NewSpecFromPersistentVolume(pv, pvcReadOnly), volumeGidValue, nil
-}
-
-func (dswp *desiredStateOfWorldPopulator) makeVolumeMap(containers []v1.Container) (map[string]bool, map[string]bool) {
-	volumeDevicesMap := make(map[string]bool)
-	volumeMountsMap := make(map[string]bool)
-
-	for _, container := range containers {
-		if container.VolumeMounts != nil {
-			for _, mount := range container.VolumeMounts {
-				volumeMountsMap[mount.Name] = true
-			}
-		}
-		// TODO: remove feature gate check after no longer needed
-		if utilfeature.DefaultFeatureGate.Enabled(features.BlockVolume) &&
-			container.VolumeDevices != nil {
-			for _, device := range container.VolumeDevices {
-				volumeDevicesMap[device.Name] = true
-			}
-		}
-	}
-
-	return volumeMountsMap, volumeDevicesMap
 }
 
 func getPVVolumeGidAnnotationValue(pv *v1.PersistentVolume) string {

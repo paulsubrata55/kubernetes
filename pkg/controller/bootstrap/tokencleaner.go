@@ -117,7 +117,7 @@ func (tc *TokenCleaner) Run(stopCh <-chan struct{}) {
 	klog.Infof("Starting token cleaner controller")
 	defer klog.Infof("Shutting down token cleaner controller")
 
-	if !controller.WaitForCacheSync("token_cleaner", stopCh, tc.secretSynced) {
+	if !cache.WaitForNamedCacheSync("token_cleaner", stopCh, tc.secretSynced) {
 		return
 	}
 
@@ -202,6 +202,11 @@ func (tc *TokenCleaner) evalSecret(o interface{}) {
 			klog.V(3).Infof("Error deleting Secret: %v", err)
 		}
 	} else if ttl > 0 {
-		tc.queue.AddAfter(o, ttl)
+		key, err := controller.KeyFunc(o)
+		if err != nil {
+			utilruntime.HandleError(err)
+			return
+		}
+		tc.queue.AddAfter(key, ttl)
 	}
 }

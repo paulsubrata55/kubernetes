@@ -1,3 +1,5 @@
+// +build !providerless
+
 /*
 Copyright 2017 The Kubernetes Authors.
 
@@ -24,7 +26,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2019-03-01/compute"
+	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2019-07-01/compute"
 	"github.com/stretchr/testify/assert"
 
 	"k8s.io/kubernetes/pkg/util/mount"
@@ -62,7 +64,6 @@ var (
 	lunStr    = "1"
 	diskPath  = "4:0:0:" + lunStr
 	devName   = "sdd"
-	lun1      = 2
 	lunStr1   = "2"
 	diskPath1 = "3:0:0:" + lunStr1
 	devName1  = "sde"

@@ -32,14 +32,15 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
-	"text/tabwriter"
 	"time"
 
+	"github.com/davecgh/go-spew/spew"
 	"golang.org/x/net/websocket"
 	"k8s.io/klog"
 
@@ -74,11 +75,8 @@ import (
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	"k8s.io/kubernetes/pkg/client/conditions"
 	"k8s.io/kubernetes/pkg/controller"
-	"k8s.io/kubernetes/pkg/controller/service"
 	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/master/ports"
-	"k8s.io/kubernetes/pkg/scheduler/algorithm/predicates"
-	schedulernodeinfo "k8s.io/kubernetes/pkg/scheduler/nodeinfo"
 	taintutils "k8s.io/kubernetes/pkg/util/taints"
 	"k8s.io/kubernetes/test/e2e/framework/ginkgowrapper"
 	e2ekubelet "k8s.io/kubernetes/test/e2e/framework/kubelet"
@@ -120,9 +118,6 @@ const (
 	// failures caused by leaked resources from a previous test run.
 	NamespaceCleanupTimeout = 15 * time.Minute
 
-	// Some pods can take much longer to get ready due to volume attach/detach latency.
-	slowPodStartTimeout = 15 * time.Minute
-
 	// ServiceStartTimeout is how long to wait for a service endpoint to be resolvable.
 	ServiceStartTimeout = 3 * time.Minute
 
@@ -149,10 +144,6 @@ const (
 	// PodReadyBeforeTimeout is how long pods have to be "ready" when a test begins.
 	PodReadyBeforeTimeout = 5 * time.Minute
 
-	// How long pods have to become scheduled onto nodes
-	podScheduledBeforeTimeout = PodListTimeout + (20 * time.Second)
-
-	podRespondingTimeout = 15 * time.Minute
 	// ClaimProvisionTimeout is how long claims have to become dynamically provisioned.
 	ClaimProvisionTimeout = 5 * time.Minute
 
@@ -160,20 +151,8 @@ const (
 	// Use it case by case when we are sure this timeout is enough.
 	ClaimProvisionShortTimeout = 1 * time.Minute
 
-	// ClaimBindingTimeout is how long claims have to become bound.
-	ClaimBindingTimeout = 3 * time.Minute
-
 	// ClaimDeletingTimeout is How long claims have to become deleted.
 	ClaimDeletingTimeout = 3 * time.Minute
-
-	// PVReclaimingTimeout is how long PVs have to beome reclaimed.
-	PVReclaimingTimeout = 3 * time.Minute
-
-	// PVBindingTimeout is how long PVs have to become bound.
-	PVBindingTimeout = 3 * time.Minute
-
-	// PVDeletingTimeout is how long PVs have to become deleted.
-	PVDeletingTimeout = 3 * time.Minute
 
 	// RecreateNodeReadyAgainTimeout is how long a node is allowed to become "Ready" after it is recreated before
 	// the test is considered failed.
@@ -208,15 +187,11 @@ var (
 	// BusyBoxImage is the image URI of BusyBox.
 	BusyBoxImage = imageutils.GetE2EImage(imageutils.BusyBox)
 
+	// AgnHostImage is the image URI of AgnHost
+	AgnHostImage = imageutils.GetE2EImage(imageutils.Agnhost)
+
 	// For parsing Kubectl version for version-skewed testing.
 	gitVersionRegexp = regexp.MustCompile("GitVersion:\"(v.+?)\"")
-
-	// Slice of regexps for names of pods that have to be running to consider a Node "healthy"
-	requiredPerNodePods = []*regexp.Regexp{
-		regexp.MustCompile(".*kube-proxy.*"),
-		regexp.MustCompile(".*fluentd-elasticsearch.*"),
-		regexp.MustCompile(".*node-problem-detector.*"),
-	}
 
 	// ServeHostnameImage is a serve hostname image name.
 	ServeHostnameImage = imageutils.GetE2EImage(imageutils.Agnhost)
@@ -347,6 +322,13 @@ func SkipUnlessNodeOSDistroIs(supportedNodeOsDistros ...string) {
 	}
 }
 
+// SkipIfNodeOSDistroIs skips if the node OS distro is included in the unsupportedNodeOsDistros.
+func SkipIfNodeOSDistroIs(unsupportedNodeOsDistros ...string) {
+	if NodeOSDistroIs(unsupportedNodeOsDistros...) {
+		skipInternalf(1, "Not supported for node OS distro %v (is %s)", unsupportedNodeOsDistros, TestContext.NodeOSDistro)
+	}
+}
+
 // SkipUnlessTaintBasedEvictionsEnabled skips if the TaintBasedEvictions is not enabled.
 func SkipUnlessTaintBasedEvictionsEnabled() {
 	if !utilfeature.DefaultFeatureGate.Enabled(features.TaintBasedEvictions) {
@@ -419,6 +401,8 @@ func runKubernetesServiceTestContainer(c clientset.Interface, ns string) {
 // getDefaultClusterIPFamily obtains the default IP family of the cluster
 // using the Cluster IP address of the kubernetes service created in the default namespace
 // This unequivocally identifies the default IP family because services are single family
+// TODO: dual-stack may support multiple families per service
+// but we can detect if a cluster is dual stack because pods have two addresses (one per family)
 func getDefaultClusterIPFamily(c clientset.Interface) string {
 	// Get the ClusterIP of the kubernetes service created in the default namespace
 	svc, err := c.CoreV1().Services(metav1.NamespaceDefault).Get("kubernetes", metav1.GetOptions{})
@@ -435,7 +419,7 @@ func getDefaultClusterIPFamily(c clientset.Interface) string {
 // ProviderIs returns true if the provider is included is the providers. Otherwise false.
 func ProviderIs(providers ...string) bool {
 	for _, provider := range providers {
-		if strings.ToLower(provider) == strings.ToLower(TestContext.Provider) {
+		if strings.EqualFold(provider, TestContext.Provider) {
 			return true
 		}
 	}
@@ -445,7 +429,7 @@ func ProviderIs(providers ...string) bool {
 // MasterOSDistroIs returns true if the master OS distro is included in the supportedMasterOsDistros. Otherwise false.
 func MasterOSDistroIs(supportedMasterOsDistros ...string) bool {
 	for _, distro := range supportedMasterOsDistros {
-		if strings.ToLower(distro) == strings.ToLower(TestContext.MasterOSDistro) {
+		if strings.EqualFold(distro, TestContext.MasterOSDistro) {
 			return true
 		}
 	}
@@ -455,7 +439,7 @@ func MasterOSDistroIs(supportedMasterOsDistros ...string) bool {
 // NodeOSDistroIs returns true if the node OS distro is included in the supportedNodeOsDistros. Otherwise false.
 func NodeOSDistroIs(supportedNodeOsDistros ...string) bool {
 	for _, distro := range supportedNodeOsDistros {
-		if strings.ToLower(distro) == strings.ToLower(TestContext.NodeOSDistro) {
+		if strings.EqualFold(distro, TestContext.NodeOSDistro) {
 			return true
 		}
 	}
@@ -473,9 +457,9 @@ func ProxyMode(f *Framework) (string, error) {
 			HostNetwork: true,
 			Containers: []v1.Container{
 				{
-					Name:    "detector",
-					Image:   imageutils.GetE2EImage(imageutils.Agnhost),
-					Command: []string{"/bin/sleep", "3600"},
+					Name:  "detector",
+					Image: AgnHostImage,
+					Args:  []string{"pause"},
 				},
 			},
 		},
@@ -518,32 +502,6 @@ func SkipIfMissingResource(dynamicClient dynamic.Interface, gvr schema.GroupVers
 
 // ProvidersWithSSH are those providers where each node is accessible with SSH
 var ProvidersWithSSH = []string{"gce", "gke", "aws", "local"}
-
-type podCondition func(pod *v1.Pod) (bool, error)
-
-// errorBadPodsStates create error message of basic info of bad pods for debugging.
-func errorBadPodsStates(badPods []v1.Pod, desiredPods int, ns, desiredState string, timeout time.Duration) string {
-	errStr := fmt.Sprintf("%d / %d pods in namespace %q are NOT in %s state in %v\n", len(badPods), desiredPods, ns, desiredState, timeout)
-	// Print bad pods info only if there are fewer than 10 bad pods
-	if len(badPods) > 10 {
-		return errStr + "There are too many bad pods. Please check log for details."
-	}
-
-	buf := bytes.NewBuffer(nil)
-	w := tabwriter.NewWriter(buf, 0, 0, 1, ' ', 0)
-	fmt.Fprintln(w, "POD\tNODE\tPHASE\tGRACE\tCONDITIONS")
-	for _, badPod := range badPods {
-		grace := ""
-		if badPod.DeletionGracePeriodSeconds != nil {
-			grace = fmt.Sprintf("%ds", *badPod.DeletionGracePeriodSeconds)
-		}
-		podInfo := fmt.Sprintf("%s\t%s\t%s\t%s\t%+v",
-			badPod.ObjectMeta.Name, badPod.Spec.NodeName, badPod.Status.Phase, grace, badPod.Status.Conditions)
-		fmt.Fprintln(w, podInfo)
-	}
-	w.Flush()
-	return errStr + buf.String()
-}
 
 // WaitForDaemonSets for all daemonsets in the given namespace to be ready
 // (defined as all but 'allowedNotReadyNodes' pods associated with that
@@ -695,24 +653,6 @@ func WaitForDefaultServiceAccountInNamespace(c clientset.Interface, namespace st
 	return waitForServiceAccountInNamespace(c, namespace, "default", ServiceAccountProvisionTimeout)
 }
 
-// WaitForPersistentVolumePhase waits for a PersistentVolume to be in a specific phase or until timeout occurs, whichever comes first.
-func WaitForPersistentVolumePhase(phase v1.PersistentVolumePhase, c clientset.Interface, pvName string, Poll, timeout time.Duration) error {
-	e2elog.Logf("Waiting up to %v for PersistentVolume %s to have phase %s", timeout, pvName, phase)
-	for start := time.Now(); time.Since(start) < timeout; time.Sleep(Poll) {
-		pv, err := c.CoreV1().PersistentVolumes().Get(pvName, metav1.GetOptions{})
-		if err != nil {
-			e2elog.Logf("Get persistent volume %s in failed, ignoring for %v: %v", pvName, Poll, err)
-			continue
-		}
-		if pv.Status.Phase == phase {
-			e2elog.Logf("PersistentVolume %s found and phase=%s (%v)", pvName, phase, time.Since(start))
-			return nil
-		}
-		e2elog.Logf("PersistentVolume %s found but phase is %s instead of %s.", pvName, pv.Status.Phase, phase)
-	}
-	return fmt.Errorf("PersistentVolume %s not in phase %s within %v", pvName, phase, timeout)
-}
-
 // WaitForStatefulSetReplicasReady waits for all replicas of a StatefulSet to become ready or until timeout occurs, whichever comes first.
 func WaitForStatefulSetReplicasReady(statefulSetName, ns string, c clientset.Interface, Poll, timeout time.Duration) error {
 	e2elog.Logf("Waiting up to %v for StatefulSet %s to have all replicas ready", timeout, statefulSetName)
@@ -747,43 +687,6 @@ func WaitForPersistentVolumeDeleted(c clientset.Interface, pvName string, Poll, 
 		e2elog.Logf("Get persistent volume %s in failed, ignoring for %v: %v", pvName, Poll, err)
 	}
 	return fmt.Errorf("PersistentVolume %s still exists within %v", pvName, timeout)
-}
-
-// WaitForPersistentVolumeClaimPhase waits for a PersistentVolumeClaim to be in a specific phase or until timeout occurs, whichever comes first.
-func WaitForPersistentVolumeClaimPhase(phase v1.PersistentVolumeClaimPhase, c clientset.Interface, ns string, pvcName string, Poll, timeout time.Duration) error {
-	return WaitForPersistentVolumeClaimsPhase(phase, c, ns, []string{pvcName}, Poll, timeout, true)
-}
-
-// WaitForPersistentVolumeClaimsPhase waits for any (if matchAny is true) or all (if matchAny is false) PersistentVolumeClaims
-// to be in a specific phase or until timeout occurs, whichever comes first.
-func WaitForPersistentVolumeClaimsPhase(phase v1.PersistentVolumeClaimPhase, c clientset.Interface, ns string, pvcNames []string, Poll, timeout time.Duration, matchAny bool) error {
-	if len(pvcNames) == 0 {
-		return fmt.Errorf("Incorrect parameter: Need at least one PVC to track. Found 0")
-	}
-	e2elog.Logf("Waiting up to %v for PersistentVolumeClaims %v to have phase %s", timeout, pvcNames, phase)
-	for start := time.Now(); time.Since(start) < timeout; time.Sleep(Poll) {
-		phaseFoundInAllClaims := true
-		for _, pvcName := range pvcNames {
-			pvc, err := c.CoreV1().PersistentVolumeClaims(ns).Get(pvcName, metav1.GetOptions{})
-			if err != nil {
-				e2elog.Logf("Failed to get claim %q, retrying in %v. Error: %v", pvcName, Poll, err)
-				continue
-			}
-			if pvc.Status.Phase == phase {
-				e2elog.Logf("PersistentVolumeClaim %s found and phase=%s (%v)", pvcName, phase, time.Since(start))
-				if matchAny {
-					return nil
-				}
-			} else {
-				e2elog.Logf("PersistentVolumeClaim %s found but phase is %s instead of %s.", pvcName, pvc.Status.Phase, phase)
-				phaseFoundInAllClaims = false
-			}
-		}
-		if phaseFoundInAllClaims {
-			return nil
-		}
-	}
-	return fmt.Errorf("PersistentVolumeClaims %v not all in phase %s within %v", pvcNames, phase, timeout)
 }
 
 // findAvailableNamespaceName random namespace name starting with baseName.
@@ -902,8 +805,11 @@ func deleteNS(c clientset.Interface, dynamicClient dynamic.Interface, namespace 
 	}
 
 	// wait for namespace to delete or timeout.
+	var lastNamespace *v1.Namespace
 	err := wait.PollImmediate(2*time.Second, timeout, func() (bool, error) {
-		if _, err := c.CoreV1().Namespaces().Get(namespace, metav1.GetOptions{}); err != nil {
+		var err error
+		lastNamespace, err = c.CoreV1().Namespaces().Get(namespace, metav1.GetOptions{})
+		if err != nil {
 			if apierrs.IsNotFound(err) {
 				return true, nil
 			}
@@ -933,6 +839,9 @@ func deleteNS(c clientset.Interface, dynamicClient dynamic.Interface, namespace 
 
 	// a timeout waiting for namespace deletion happened!
 	if err != nil {
+		// namespaces now have conditions that are useful for debugging generic resources and finalizers
+		e2elog.Logf("namespace did not cleanup: %s", spew.Sdump(lastNamespace))
+
 		// some content remains in the namespace
 		if remainingContent {
 			// pods remain
@@ -1356,16 +1265,28 @@ func RandomSuffix() string {
 
 // ExpectEqual expects the specified two are the same, otherwise an exception raises
 func ExpectEqual(actual interface{}, extra interface{}, explain ...interface{}) {
+	if isEqual, _ := gomega.Equal(extra).Match(actual); !isEqual {
+		e2elog.Logf("Unexpected unequal occurred: %v and %v", actual, extra)
+		debug.PrintStack()
+	}
 	gomega.Expect(actual).To(gomega.Equal(extra), explain...)
 }
 
 // ExpectNotEqual expects the specified two are not the same, otherwise an exception raises
 func ExpectNotEqual(actual interface{}, extra interface{}, explain ...interface{}) {
+	if isEqual, _ := gomega.Equal(extra).Match(actual); isEqual {
+		e2elog.Logf("Expect to be unequal: %v and %v", actual, extra)
+		debug.PrintStack()
+	}
 	gomega.Expect(actual).NotTo(gomega.Equal(extra), explain...)
 }
 
 // ExpectError expects an error happens, otherwise an exception raises
 func ExpectError(err error, explain ...interface{}) {
+	if err == nil {
+		e2elog.Logf("Expect error to occur.")
+		debug.PrintStack()
+	}
 	gomega.Expect(err).To(gomega.HaveOccurred(), explain...)
 }
 
@@ -1377,9 +1298,6 @@ func ExpectNoError(err error, explain ...interface{}) {
 // ExpectNoErrorWithOffset checks if "err" is set, and if so, fails assertion while logging the error at "offset" levels above its caller
 // (for example, for call chain f -> g -> ExpectNoErrorWithOffset(1, ...) error would be logged for "f").
 func ExpectNoErrorWithOffset(offset int, err error, explain ...interface{}) {
-	if err != nil {
-		e2elog.Logf("Unexpected error occurred: %v", err)
-	}
 	gomega.ExpectWithOffset(1+offset, err).NotTo(gomega.HaveOccurred(), explain...)
 }
 
@@ -1392,6 +1310,9 @@ func ExpectNoErrorWithRetries(fn func() error, maxRetries int, explain ...interf
 			return
 		}
 		e2elog.Logf("(Attempt %d of %d) Unexpected error occurred: %v", i+1, maxRetries, err)
+	}
+	if err != nil {
+		debug.PrintStack()
 	}
 	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred(), explain...)
 }
@@ -1554,12 +1475,12 @@ func (b KubectlBuilder) ExecOrDie() string {
 
 func isTimeout(err error) bool {
 	switch err := err.(type) {
-	case net.Error:
-		if err.Timeout() {
-			return true
-		}
 	case *url.Error:
 		if err, ok := err.Err.(net.Error); ok && err.Timeout() {
+			return true
+		}
+	case net.Error:
+		if err.Timeout() {
 			return true
 		}
 	}
@@ -1905,47 +1826,6 @@ func waitListSchedulableNodesOrDie(c clientset.Interface) *v1.NodeList {
 	return nodes
 }
 
-// Node is schedulable if:
-// 1) doesn't have "unschedulable" field set
-// 2) it's Ready condition is set to true
-// 3) doesn't have NetworkUnavailable condition set to true
-func isNodeSchedulable(node *v1.Node) bool {
-	nodeReady := e2enode.IsConditionSetAsExpected(node, v1.NodeReady, true)
-	networkReady := e2enode.IsConditionUnset(node, v1.NodeNetworkUnavailable) ||
-		e2enode.IsConditionSetAsExpectedSilent(node, v1.NodeNetworkUnavailable, false)
-	return !node.Spec.Unschedulable && nodeReady && networkReady
-}
-
-// Test whether a fake pod can be scheduled on "node", given its current taints.
-func isNodeUntainted(node *v1.Node) bool {
-	fakePod := &v1.Pod{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "Pod",
-			APIVersion: "v1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "fake-not-scheduled",
-			Namespace: "fake-not-scheduled",
-		},
-		Spec: v1.PodSpec{
-			Containers: []v1.Container{
-				{
-					Name:  "fake-not-scheduled",
-					Image: "fake-not-scheduled",
-				},
-			},
-		},
-	}
-	nodeInfo := schedulernodeinfo.NewNodeInfo()
-	nodeInfo.SetNode(node)
-	fit, _, err := predicates.PodToleratesNodeTaints(fakePod, nil, nodeInfo)
-	if err != nil {
-		e2elog.Failf("Can't test predicates for node %s: %v", node.Name, err)
-		return false
-	}
-	return fit
-}
-
 // GetReadySchedulableNodesOrDie addresses the common use case of getting nodes you can do work on.
 // 1) Needs to be schedulable.
 // 2) Needs to be ready.
@@ -1956,7 +1836,7 @@ func GetReadySchedulableNodesOrDie(c clientset.Interface) (nodes *v1.NodeList) {
 	// previous tests may have cause failures of some nodes. Let's skip
 	// 'Not Ready' nodes, just in case (there is no need to fail the test).
 	e2enode.Filter(nodes, func(node v1.Node) bool {
-		return isNodeSchedulable(&node) && isNodeUntainted(&node)
+		return e2enode.IsNodeSchedulable(&node) && e2enode.IsNodeUntainted(&node)
 	})
 	return nodes
 }
@@ -1966,58 +1846,11 @@ func GetReadySchedulableNodesOrDie(c clientset.Interface) (nodes *v1.NodeList) {
 func WaitForAllNodesSchedulable(c clientset.Interface, timeout time.Duration) error {
 	e2elog.Logf("Waiting up to %v for all (but %d) nodes to be schedulable", timeout, TestContext.AllowedNotReadyNodes)
 
-	var notSchedulable []*v1.Node
-	attempt := 0
-	return wait.PollImmediate(30*time.Second, timeout, func() (bool, error) {
-		attempt++
-		notSchedulable = nil
-		opts := metav1.ListOptions{
-			ResourceVersion: "0",
-			FieldSelector:   fields.Set{"spec.unschedulable": "false"}.AsSelector().String(),
-		}
-		nodes, err := c.CoreV1().Nodes().List(opts)
-		if err != nil {
-			e2elog.Logf("Unexpected error listing nodes: %v", err)
-			if testutils.IsRetryableAPIError(err) {
-				return false, nil
-			}
-			return false, err
-		}
-		for i := range nodes.Items {
-			node := &nodes.Items[i]
-			if _, hasMasterRoleLabel := node.ObjectMeta.Labels[service.LabelNodeRoleMaster]; hasMasterRoleLabel {
-				// Kops clusters have masters with spec.unscheduable = false and
-				// node-role.kubernetes.io/master NoSchedule taint.
-				// Don't wait for them.
-				continue
-			}
-			if !isNodeSchedulable(node) || !isNodeUntainted(node) {
-				notSchedulable = append(notSchedulable, node)
-			}
-		}
-		// Framework allows for <TestContext.AllowedNotReadyNodes> nodes to be non-ready,
-		// to make it possible e.g. for incorrect deployment of some small percentage
-		// of nodes (which we allow in cluster validation). Some nodes that are not
-		// provisioned correctly at startup will never become ready (e.g. when something
-		// won't install correctly), so we can't expect them to be ready at any point.
-		//
-		// However, we only allow non-ready nodes with some specific reasons.
-		if len(notSchedulable) > 0 {
-			// In large clusters, log them only every 10th pass.
-			if len(nodes.Items) < largeClusterThreshold || attempt%10 == 0 {
-				e2elog.Logf("Unschedulable nodes:")
-				for i := range notSchedulable {
-					e2elog.Logf("-> %s Ready=%t Network=%t Taints=%v",
-						notSchedulable[i].Name,
-						e2enode.IsConditionSetAsExpectedSilent(notSchedulable[i], v1.NodeReady, true),
-						e2enode.IsConditionSetAsExpectedSilent(notSchedulable[i], v1.NodeNetworkUnavailable, false),
-						notSchedulable[i].Spec.Taints)
-				}
-				e2elog.Logf("================================")
-			}
-		}
-		return len(notSchedulable) <= TestContext.AllowedNotReadyNodes, nil
-	})
+	return wait.PollImmediate(
+		30*time.Second,
+		timeout,
+		e2enode.CheckReadyForTests(c, TestContext.NonblockingTaints, TestContext.AllowedNotReadyNodes, largeClusterThreshold),
+	)
 }
 
 // GetPodSecretUpdateTimeout reuturns the timeout duration for updating pod secret.
@@ -2201,10 +2034,10 @@ func ScaleResource(
 	size uint,
 	wait bool,
 	kind schema.GroupKind,
-	gr schema.GroupResource,
+	gvr schema.GroupVersionResource,
 ) error {
 	ginkgo.By(fmt.Sprintf("Scaling %v %s in namespace %s to %d", kind, name, ns, size))
-	if err := testutils.ScaleResourceWithRetries(scalesGetter, ns, name, size, gr); err != nil {
+	if err := testutils.ScaleResourceWithRetries(scalesGetter, ns, name, size, gvr); err != nil {
 		return fmt.Errorf("error while scaling RC %s to %d replicas: %v", name, size, err)
 	}
 	if !wait {
@@ -2469,6 +2302,9 @@ func RestartKubelet(host string) error {
 			sudoPresent = true
 		}
 		sshResult, err = e2essh.SSH("systemctl --version", host, TestContext.Provider)
+		if err != nil {
+			return fmt.Errorf("Failed to execute command 'systemctl' on host %s with error %v", host, err)
+		}
 		if !strings.Contains(sshResult.Stderr, "command not found") {
 			cmd = "systemctl restart kubelet"
 		} else {
@@ -2807,13 +2643,6 @@ func LookForStringInLog(ns, podName, container, expectedString string, timeout t
 	})
 }
 
-// LookForStringInFile looks for the given string in a file in a specific pod container
-func LookForStringInFile(ns, podName, container, file, expectedString string, timeout time.Duration) (result string, err error) {
-	return LookForString(expectedString, timeout, func() string {
-		return RunKubectlOrDie("exec", podName, "-c", container, fmt.Sprintf("--namespace=%v", ns), "--", "cat", file)
-	})
-}
-
 // EnsureLoadBalancerResourcesDeleted ensures that cloud load balancer resources that were created
 // are actually cleaned up.  Currently only implemented for GCE/GKE.
 func EnsureLoadBalancerResourcesDeleted(ip, portRange string) error {
@@ -2876,29 +2705,19 @@ func UnblockNetwork(from string, to string) {
 	}
 }
 
-// PingCommand is the type to hold ping command.
-type PingCommand string
-
-const (
-	// IPv4PingCommand is a ping command for IPv4.
-	IPv4PingCommand PingCommand = "ping"
-	// IPv6PingCommand is a ping command for IPv6.
-	IPv6PingCommand PingCommand = "ping6"
-)
-
 // CheckConnectivityToHost launches a pod to test connectivity to the specified
 // host. An error will be returned if the host is not reachable from the pod.
 //
 // An empty nodeName will use the schedule to choose where the pod is executed.
-func CheckConnectivityToHost(f *Framework, nodeName, podName, host string, pingCmd PingCommand, timeout int) error {
+func CheckConnectivityToHost(f *Framework, nodeName, podName, host string, port, timeout int) error {
 	contName := fmt.Sprintf("%s-container", podName)
 
 	command := []string{
-		string(pingCmd),
-		"-c", "3", // send 3 pings
-		"-W", "2", // wait at most 2 seconds for a reply
+		"nc",
+		"-vz",
 		"-w", strconv.Itoa(timeout),
 		host,
+		strconv.Itoa(port),
 	}
 
 	pod := &v1.Pod{
@@ -2909,7 +2728,7 @@ func CheckConnectivityToHost(f *Framework, nodeName, podName, host string, pingC
 			Containers: []v1.Container{
 				{
 					Name:    contName,
-					Image:   BusyBoxImage,
+					Image:   AgnHostImage,
 					Command: command,
 				},
 			},
@@ -3257,7 +3076,7 @@ func (f *Framework) NewAgnhostPod(name string, args ...string) *v1.Pod {
 			Containers: []v1.Container{
 				{
 					Name:  "agnhost",
-					Image: imageutils.GetE2EImage(imageutils.Agnhost),
+					Image: AgnHostImage,
 					Args:  args,
 				},
 			},
@@ -3450,4 +3269,19 @@ func GetFileModeRegex(filePath string, mask *int32) string {
 	windowsOutput := fmt.Sprintf("mode of Windows file \"%v\": %s", filePath, os.FileMode(windowsMask))
 
 	return fmt.Sprintf("(%s|%s)", linuxOutput, windowsOutput)
+}
+
+// PrettyPrintJSON converts metrics to JSON format.
+func PrettyPrintJSON(metrics interface{}) string {
+	output := &bytes.Buffer{}
+	if err := json.NewEncoder(output).Encode(metrics); err != nil {
+		Logf("Error building encoder: %v", err)
+		return ""
+	}
+	formatted := &bytes.Buffer{}
+	if err := json.Indent(formatted, output.Bytes(), "", "  "); err != nil {
+		Logf("Error indenting: %v", err)
+		return ""
+	}
+	return string(formatted.Bytes())
 }

@@ -67,7 +67,7 @@ type RequestScope struct {
 	EquivalentResourceMapper runtime.EquivalentResourceMapper
 
 	TableConvertor rest.TableConvertor
-	FieldManager   *fieldmanager.FieldManager
+	FieldManager   fieldmanager.FieldManager
 
 	Resource    schema.GroupVersionResource
 	Kind        schema.GroupVersionKind
@@ -163,14 +163,14 @@ func ConnectResource(connecter rest.Connecter, scope *RequestScope, admit admiss
 			userInfo, _ := request.UserFrom(ctx)
 			// TODO: remove the mutating admission here as soon as we have ported all plugin that handle CONNECT
 			if mutatingAdmission, ok := admit.(admission.MutationInterface); ok {
-				err = mutatingAdmission.Admit(admission.NewAttributesRecord(opts, nil, scope.Kind, namespace, name, scope.Resource, scope.Subresource, admission.Connect, nil, false, userInfo), scope)
+				err = mutatingAdmission.Admit(ctx, admission.NewAttributesRecord(opts, nil, scope.Kind, namespace, name, scope.Resource, scope.Subresource, admission.Connect, nil, false, userInfo), scope)
 				if err != nil {
 					scope.err(err, w, req)
 					return
 				}
 			}
 			if validatingAdmission, ok := admit.(admission.ValidationInterface); ok {
-				err = validatingAdmission.Validate(admission.NewAttributesRecord(opts, nil, scope.Kind, namespace, name, scope.Resource, scope.Subresource, admission.Connect, nil, false, userInfo), scope)
+				err = validatingAdmission.Validate(ctx, admission.NewAttributesRecord(opts, nil, scope.Kind, namespace, name, scope.Resource, scope.Subresource, admission.Connect, nil, false, userInfo), scope)
 				if err != nil {
 					scope.err(err, w, req)
 					return
@@ -220,12 +220,15 @@ func finishRequest(timeout time.Duration, fn resultFunc) (result runtime.Object,
 		defer func() {
 			panicReason := recover()
 			if panicReason != nil {
-				// Same as stdlib http server code. Manually allocate stack
-				// trace buffer size to prevent excessively large logs
-				const size = 64 << 10
-				buf := make([]byte, size)
-				buf = buf[:goruntime.Stack(buf, false)]
-				panicReason = fmt.Sprintf("%v\n%s", panicReason, buf)
+				// do not wrap the sentinel ErrAbortHandler panic value
+				if panicReason != http.ErrAbortHandler {
+					// Same as stdlib http server code. Manually allocate stack
+					// trace buffer size to prevent excessively large logs
+					const size = 64 << 10
+					buf := make([]byte, size)
+					buf = buf[:goruntime.Stack(buf, false)]
+					panicReason = fmt.Sprintf("%v\n%s", panicReason, buf)
+				}
 				// Propagate to parent goroutine
 				panicCh <- panicReason
 			}

@@ -1,3 +1,5 @@
+// +build !providerless
+
 /*
 Copyright 2017 The Kubernetes Authors.
 
@@ -24,9 +26,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Azure/azure-sdk-for-go/services/network/mgmt/2018-08-01/network"
+	"github.com/Azure/azure-sdk-for-go/services/network/mgmt/2019-06-01/network"
 	"github.com/Azure/go-autorest/autorest/to"
 	"github.com/stretchr/testify/assert"
+
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -175,14 +178,14 @@ func TestFindRule(t *testing.T) {
 				{
 					Name: to.StringPtr("probe1"),
 					LoadBalancingRulePropertiesFormat: &network.LoadBalancingRulePropertiesFormat{
-						LoadDistribution: network.SourceIP,
+						LoadDistribution: network.LoadDistributionSourceIP,
 					},
 				},
 			},
 			curRule: network.LoadBalancingRule{
 				Name: to.StringPtr("probe2"),
 				LoadBalancingRulePropertiesFormat: &network.LoadBalancingRulePropertiesFormat{
-					LoadDistribution: network.SourceIP,
+					LoadDistribution: network.LoadDistributionSourceIP,
 				},
 			},
 			expected: false,
@@ -195,7 +198,7 @@ func TestFindRule(t *testing.T) {
 					LoadBalancingRulePropertiesFormat: &network.LoadBalancingRulePropertiesFormat{
 						BackendPort:      to.Int32Ptr(2),
 						FrontendPort:     to.Int32Ptr(2),
-						LoadDistribution: network.SourceIP,
+						LoadDistribution: network.LoadDistributionSourceIP,
 					},
 				},
 			},
@@ -204,7 +207,7 @@ func TestFindRule(t *testing.T) {
 				LoadBalancingRulePropertiesFormat: &network.LoadBalancingRulePropertiesFormat{
 					BackendPort:      to.Int32Ptr(2),
 					FrontendPort:     to.Int32Ptr(2),
-					LoadDistribution: network.SourceIP,
+					LoadDistribution: network.LoadDistributionSourceIP,
 				},
 			},
 			expected: true,
@@ -1833,6 +1836,7 @@ func TestEnsurePublicIPExists(t *testing.T) {
 		existingPIPs  []network.PublicIPAddress
 		expectedPIP   *network.PublicIPAddress
 		expectedID    string
+		expectedDNS   string
 		expectedError bool
 	}{
 		{
@@ -1849,6 +1853,28 @@ func TestEnsurePublicIPExists(t *testing.T) {
 			expectedID: "/subscriptions/subscription/resourceGroups/rg/providers/" +
 				"Microsoft.Network/publicIPAddresses/pip1",
 		},
+		{
+			desc: "ensurePublicIPExists shall update existed PIP's dns label",
+			existingPIPs: []network.PublicIPAddress{{
+				Name: to.StringPtr("pip1"),
+				PublicIPAddressPropertiesFormat: &network.PublicIPAddressPropertiesFormat{
+					DNSSettings: &network.PublicIPAddressDNSSettings{
+						DomainNameLabel: to.StringPtr("previousdns"),
+					},
+				},
+			}},
+			expectedPIP: &network.PublicIPAddress{
+				Name: to.StringPtr("pip1"),
+				ID: to.StringPtr("/subscriptions/subscription/resourceGroups/rg" +
+					"/providers/Microsoft.Network/publicIPAddresses/pip1"),
+				PublicIPAddressPropertiesFormat: &network.PublicIPAddressPropertiesFormat{
+					DNSSettings: &network.PublicIPAddressDNSSettings{
+						DomainNameLabel: to.StringPtr("newdns"),
+					},
+				},
+			},
+			expectedDNS: "newdns",
+		},
 	}
 
 	for i, test := range testCases {
@@ -1860,7 +1886,7 @@ func TestEnsurePublicIPExists(t *testing.T) {
 				t.Fatalf("TestCase[%d] meets unexpected error: %v", i, err)
 			}
 		}
-		pip, err := az.ensurePublicIPExists(&service, "pip1", "", "", false)
+		pip, err := az.ensurePublicIPExists(&service, "pip1", test.expectedDNS, "", false)
 		if test.expectedID != "" {
 			assert.Equal(t, test.expectedID, to.String(pip.ID), "TestCase[%d]: %s", i, test.desc)
 		} else {

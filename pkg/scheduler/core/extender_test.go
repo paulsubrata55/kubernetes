@@ -23,7 +23,9 @@ import (
 	"time"
 
 	"k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/kubernetes/pkg/scheduler/algorithm"
 	"k8s.io/kubernetes/pkg/scheduler/algorithm/predicates"
@@ -42,7 +44,7 @@ type priorityFunc func(pod *v1.Pod, nodes []*v1.Node) (*schedulerapi.HostPriorit
 
 type priorityConfig struct {
 	function priorityFunc
-	weight   int
+	weight   int64
 }
 
 func errorPredicateExtender(pod *v1.Pod, node *v1.Node) (bool, error) {
@@ -82,7 +84,7 @@ func machine1PrioritizerExtender(pod *v1.Pod, nodes []*v1.Node) (*schedulerapi.H
 		if node.Name == "machine1" {
 			score = 10
 		}
-		result = append(result, schedulerapi.HostPriority{Host: node.Name, Score: score})
+		result = append(result, schedulerapi.HostPriority{Host: node.Name, Score: int64(score)})
 	}
 	return &result, nil
 }
@@ -94,7 +96,7 @@ func machine2PrioritizerExtender(pod *v1.Pod, nodes []*v1.Node) (*schedulerapi.H
 		if node.Name == "machine2" {
 			score = 10
 		}
-		result = append(result, schedulerapi.HostPriority{Host: node.Name, Score: score})
+		result = append(result, schedulerapi.HostPriority{Host: node.Name, Score: int64(score)})
 	}
 	return &result, nil
 }
@@ -106,7 +108,7 @@ func machine2Prioritizer(_ *v1.Pod, nodeNameToInfo map[string]*schedulernodeinfo
 		if node.Name == "machine2" {
 			score = 10
 		}
-		result = append(result, schedulerapi.HostPriority{Host: node.Name, Score: score})
+		result = append(result, schedulerapi.HostPriority{Host: node.Name, Score: int64(score)})
 	}
 	return result, nil
 }
@@ -114,7 +116,7 @@ func machine2Prioritizer(_ *v1.Pod, nodeNameToInfo map[string]*schedulernodeinfo
 type FakeExtender struct {
 	predicates       []fitPredicate
 	prioritizers     []priorityConfig
-	weight           int
+	weight           int64
 	nodeCacheCapable bool
 	filteredNodes    []*v1.Node
 	unInterested     bool
@@ -165,7 +167,7 @@ func (f *FakeExtender) ProcessPreemption(
 		} else {
 			// Append new victims to original victims
 			nodeToVictimsCopy[node].Pods = append(victims.Pods, extenderVictimPods...)
-			nodeToVictimsCopy[node].NumPDBViolations = victims.NumPDBViolations + extendernPDBViolations
+			nodeToVictimsCopy[node].NumPDBViolations = victims.NumPDBViolations + int64(extendernPDBViolations)
 		}
 	}
 	return nodeToVictimsCopy, nil
@@ -290,9 +292,9 @@ func (f *FakeExtender) Filter(pod *v1.Pod, nodes []*v1.Node, nodeNameToInfo map[
 	return filtered, failedNodesMap, nil
 }
 
-func (f *FakeExtender) Prioritize(pod *v1.Pod, nodes []*v1.Node) (*schedulerapi.HostPriorityList, int, error) {
+func (f *FakeExtender) Prioritize(pod *v1.Pod, nodes []*v1.Node) (*schedulerapi.HostPriorityList, int64, error) {
 	result := schedulerapi.HostPriorityList{}
-	combinedScores := map[string]int{}
+	combinedScores := map[string]int64{}
 	for _, prioritizer := range f.prioritizers {
 		weight := prioritizer.weight
 		if weight == 0 {
@@ -553,7 +555,7 @@ func TestGenericSchedulerWithExtenders(t *testing.T) {
 				schedulerapi.DefaultPercentageOfNodesToScore,
 				false)
 			podIgnored := &v1.Pod{}
-			result, err := scheduler.Schedule(podIgnored, framework.NewPluginContext())
+			result, err := scheduler.Schedule(framework.NewPluginContext(), podIgnored)
 			if test.expectsErr {
 				if err == nil {
 					t.Errorf("Unexpected non-error, result %+v", result)
@@ -574,4 +576,88 @@ func TestGenericSchedulerWithExtenders(t *testing.T) {
 
 func createNode(name string) *v1.Node {
 	return &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}}
+}
+
+func TestIsInterested(t *testing.T) {
+	mem := &HTTPExtender{
+		managedResources: sets.NewString(),
+	}
+	mem.managedResources.Insert("memory")
+
+	for _, tc := range []struct {
+		label    string
+		extender *HTTPExtender
+		pod      *v1.Pod
+		want     bool
+	}{
+		{
+			label: "Empty managed resources",
+			extender: &HTTPExtender{
+				managedResources: sets.NewString(),
+			},
+			pod:  &v1.Pod{},
+			want: true,
+		},
+		{
+			label:    "Managed memory, empty resources",
+			extender: mem,
+			pod: &v1.Pod{
+				Spec: v1.PodSpec{
+					Containers: []v1.Container{
+						{
+							Name: "app",
+						},
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			label:    "Managed memory, container memory",
+			extender: mem,
+			pod: &v1.Pod{
+				Spec: v1.PodSpec{
+					Containers: []v1.Container{
+						{
+							Name: "app",
+							Resources: v1.ResourceRequirements{
+								Requests: v1.ResourceList{"memory": resource.Quantity{}},
+								Limits:   v1.ResourceList{"memory": resource.Quantity{}},
+							},
+						},
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			label:    "Managed memory, init container memory",
+			extender: mem,
+			pod: &v1.Pod{
+				Spec: v1.PodSpec{
+					Containers: []v1.Container{
+						{
+							Name: "app",
+						},
+					},
+					InitContainers: []v1.Container{
+						{
+							Name: "init",
+							Resources: v1.ResourceRequirements{
+								Requests: v1.ResourceList{"memory": resource.Quantity{}},
+								Limits:   v1.ResourceList{"memory": resource.Quantity{}},
+							},
+						},
+					},
+				},
+			},
+			want: true,
+		},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			if got := tc.extender.IsInterested(tc.pod); got != tc.want {
+				t.Fatalf("IsInterested(%v) = %v, wanted %v", tc.pod, got, tc.want)
+			}
+		})
+	}
 }

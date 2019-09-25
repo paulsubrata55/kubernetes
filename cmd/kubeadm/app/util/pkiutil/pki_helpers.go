@@ -198,7 +198,7 @@ func CertOrKeyExist(pkiPath, name string) bool {
 	_, certErr := os.Stat(certificatePath)
 	_, keyErr := os.Stat(privateKeyPath)
 	if os.IsNotExist(certErr) && os.IsNotExist(keyErr) {
-		// The cert or the key did not exist
+		// The cert and the key do not exist
 		return false
 	}
 
@@ -480,8 +480,7 @@ func parseCSRPEM(pemCSR []byte) (*x509.CertificateRequest, error) {
 	}
 
 	if block.Type != certutil.CertificateRequestBlockType {
-		var block *pem.Block
-		return nil, errors.Errorf("expected block type %q, but PEM had type %v", certutil.CertificateRequestBlockType, block.Type)
+		return nil, errors.Errorf("expected block type %q, but PEM had type %q", certutil.CertificateRequestBlockType, block.Type)
 	}
 
 	return x509.ParseCertificateRequest(block.Bytes)

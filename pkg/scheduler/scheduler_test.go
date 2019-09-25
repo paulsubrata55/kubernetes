@@ -153,7 +153,7 @@ type mockScheduler struct {
 	err    error
 }
 
-func (es mockScheduler) Schedule(pod *v1.Pod, pc *framework.PluginContext) (core.ScheduleResult, error) {
+func (es mockScheduler) Schedule(pc *framework.PluginContext, pod *v1.Pod) (core.ScheduleResult, error) {
 	return es.result, es.err
 }
 
@@ -163,8 +163,11 @@ func (es mockScheduler) Predicates() map[string]predicates.FitPredicate {
 func (es mockScheduler) Prioritizers() []priorities.PriorityConfig {
 	return nil
 }
+func (es mockScheduler) Extenders() []algorithm.SchedulerExtender {
+	return nil
+}
 
-func (es mockScheduler) Preempt(pod *v1.Pod, scheduleErr error) (*v1.Node, []*v1.Pod, []*v1.Pod, error) {
+func (es mockScheduler) Preempt(pc *framework.PluginContext, pod *v1.Pod, scheduleErr error) (*v1.Node, []*v1.Pod, []*v1.Pod, error) {
 	return nil, nil, nil, nil
 }
 
@@ -349,6 +352,7 @@ func TestSchedulerNoPhantomPodAfterExpire(t *testing.T) {
 
 	waitPodExpireChan := make(chan struct{})
 	timeout := make(chan struct{})
+	errChan := make(chan error)
 	go func() {
 		for {
 			select {
@@ -358,7 +362,8 @@ func TestSchedulerNoPhantomPodAfterExpire(t *testing.T) {
 			}
 			pods, err := scache.List(labels.Everything())
 			if err != nil {
-				t.Fatalf("cache.List failed: %v", err)
+				errChan <- fmt.Errorf("cache.List failed: %v", err)
+				return
 			}
 			if len(pods) == 0 {
 				close(waitPodExpireChan)
@@ -369,6 +374,8 @@ func TestSchedulerNoPhantomPodAfterExpire(t *testing.T) {
 	}()
 	// waiting for the assumed pod to expire
 	select {
+	case err := <-errChan:
+		t.Fatal(err)
 	case <-waitPodExpireChan:
 	case <-time.After(wait.ForeverTestTimeout):
 		close(timeout)
@@ -767,7 +774,7 @@ func setupTestSchedulerWithVolumeBinding(fakeVolumeBinder *volumebinder.VolumeBi
 	s, bindingChan, errChan := setupTestScheduler(queuedPodStore, scache, informerFactory, predicateMap, recorder)
 	informerFactory.Start(stop)
 	informerFactory.WaitForCacheSync(stop)
-	s.config.VolumeBinder = fakeVolumeBinder
+	s.VolumeBinder = fakeVolumeBinder
 	return s, bindingChan, errChan
 }
 

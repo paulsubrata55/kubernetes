@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"k8s.io/kubernetes/test/e2e/framework"
-	e2elog "k8s.io/kubernetes/test/e2e/framework/log"
 	instrumentation "k8s.io/kubernetes/test/e2e/instrumentation/common"
 	"k8s.io/kubernetes/test/e2e/instrumentation/logging/utils"
 
@@ -36,9 +35,6 @@ const (
 	// considered acceptable. Once per hour is fine for now, as long as it
 	// doesn't loose too much logs.
 	maxAllowedRestartsPerHour = 1.0
-	// lastPodIngestionSlack is the amount of time to wait for the last pod's
-	// logs to be ingested by the logging agent.
-	lastPodIngestionSlack = 5 * time.Minute
 )
 
 var _ = instrumentation.SIGDescribe("Cluster level logging implemented by Stackdriver [Feature:StackdriverLogging] [Soak]", func() {
@@ -86,7 +82,7 @@ var _ = instrumentation.SIGDescribe("Cluster level logging implemented by Stackd
 					// Starting one pod on each node.
 					for _, pod := range podsByRun[runIdx] {
 						if err := pod.Start(f); err != nil {
-							e2elog.Logf("Failed to start pod: %v", err)
+							framework.Logf("Failed to start pod: %v", err)
 						}
 					}
 					<-t.C

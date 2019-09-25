@@ -180,7 +180,6 @@ func NewCmdGet(parent string, f cmdutil.Factory, streams genericclioptions.IOStr
 	cmd.Flags().StringVarP(&o.LabelSelector, "selector", "l", o.LabelSelector, "Selector (label query) to filter on, supports '=', '==', and '!='.(e.g. -l key1=value1,key2=value2)")
 	cmd.Flags().StringVar(&o.FieldSelector, "field-selector", o.FieldSelector, "Selector (field query) to filter on, supports '=', '==', and '!='.(e.g. --field-selector key1=value1,key2=value2). The server only supports a limited number of field queries per type.")
 	cmd.Flags().BoolVarP(&o.AllNamespaces, "all-namespaces", "A", o.AllNamespaces, "If present, list the requested object(s) across all namespaces. Namespace in current context is ignored even if specified with --namespace.")
-	cmdutil.AddIncludeUninitializedFlag(cmd)
 	addOpenAPIPrintColumnFlags(cmd, o)
 	addServerPrintColumnFlags(cmd, o)
 	cmd.Flags().BoolVar(&o.Export, "export", o.Export, "If true, use 'export' for the resources.  Exported resources are stripped of cluster-specific information.")
@@ -750,8 +749,8 @@ func (o *GetOptions) printGeneric(r *resource.Result) error {
 	}
 
 	var obj runtime.Object
-	if !singleItemImplied || len(infos) > 1 {
-		// we have more than one item, so coerce all items into a list.
+	if !singleItemImplied || len(infos) != 1 {
+		// we have zero or multple items, so coerce all items into a list.
 		// we don't want an *unstructured.Unstructured list yet, as we
 		// may be dealing with non-unstructured objects. Compose all items
 		// into an corev1.List, and then decode using an unstructured scheme.

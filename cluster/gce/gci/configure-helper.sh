@@ -556,9 +556,6 @@ function create-master-pki {
   write-pki-data "${SERVICEACCOUNT_KEY}" "${SERVICEACCOUNT_KEY_PATH}"
 
   if [[ ! -z "${REQUESTHEADER_CA_CERT:-}" ]]; then
-    AGGREGATOR_CA_KEY_PATH="${pki_dir}/aggr_ca.key"
-    write-pki-data "${AGGREGATOR_CA_KEY}" "${AGGREGATOR_CA_KEY_PATH}"
-
     REQUESTHEADER_CA_CERT_PATH="${pki_dir}/aggr_ca.crt"
     write-pki-data "${REQUESTHEADER_CA_CERT}" "${REQUESTHEADER_CA_CERT_PATH}"
 
@@ -1399,13 +1396,17 @@ function start-node-problem-detector {
     local -r km_config="${KUBE_HOME}/node-problem-detector/config/kernel-monitor.json"
     # TODO(random-liu): Handle this for alternative container runtime.
     local -r dm_config="${KUBE_HOME}/node-problem-detector/config/docker-monitor.json"
+    local -r sm_config="${KUBE_HOME}/node-problem-detector/config/systemd-monitor.json"
+    local -r ssm_config="${KUBE_HOME}/node-problem-detector/config/system-stats-monitor.json"
+
     local -r custom_km_config="${KUBE_HOME}/node-problem-detector/config/kernel-monitor-counter.json"
-    local -r custom_dm_config="${KUBE_HOME}/node-problem-detector/config/docker-monitor-counter.json"
     local -r custom_sm_config="${KUBE_HOME}/node-problem-detector/config/systemd-monitor-counter.json"
+
     flags="${NPD_TEST_LOG_LEVEL:-"--v=2"} ${NPD_TEST_ARGS:-}"
     flags+=" --logtostderr"
-    flags+=" --system-log-monitors=${km_config},${dm_config}"
-    flags+=" --custom-plugin-monitors=${custom_km_config},${custom_dm_config},${custom_sm_config}"
+    flags+=" --config.system-log-monitor=${km_config},${dm_config},${sm_config}"
+    flags+=" --config.system-stats-monitor=${ssm_config}"
+    flags+=" --config.custom-plugin-monitor=${custom_km_config},${custom_sm_config}"
     local -r npd_port=${NODE_PROBLEM_DETECTOR_PORT:-20256}
     flags+=" --port=${npd_port}"
     if [[ -n "${EXTRA_NPD_ARGS:-}" ]]; then
@@ -1541,7 +1542,7 @@ function prepare-etcd-manifest {
     etcd_apiserver_creds=" --client-cert-auth --trusted-ca-file ${ETCD_APISERVER_CA_CERT_PATH} --cert-file ${ETCD_APISERVER_SERVER_CERT_PATH} --key-file ${ETCD_APISERVER_SERVER_KEY_PATH} "
     etcd_apiserver_protocol="https"
     etcd_livenessprobe_port="2382"
-    etcd_extra_args+=" --listen-metrics-urls=http://127.0.0.1:${etcd_livenessprobe_port} "
+    etcd_extra_args+=" --listen-metrics-urls=http://${ETCD_LISTEN_CLIENT_IP:-127.0.0.1}:${etcd_livenessprobe_port} "
   fi
 
   for host in $(echo "${INITIAL_ETCD_CLUSTER:-${host_name}}" | tr "," "\n"); do
@@ -2547,6 +2548,7 @@ function update-daemon-set-prometheus-to-sd-parameters {
 function update-event-exporter {
     local -r stackdriver_resource_model="${LOGGING_STACKDRIVER_RESOURCE_TYPES:-old}"
     sed -i -e "s@{{ exporter_sd_resource_model }}@${stackdriver_resource_model}@g" "$1"
+    sed -i -e "s@{{ exporter_sd_endpoint }}@${STACKDRIVER_TEST_ENDPOINT:-}@g" "$1"
 }
 
 function update-dashboard-controller {
@@ -2593,7 +2595,7 @@ function setup-fluentd {
   fluentd_gcp_yaml_version="${FLUENTD_GCP_YAML_VERSION:-v3.2.0}"
   sed -i -e "s@{{ fluentd_gcp_yaml_version }}@${fluentd_gcp_yaml_version}@g" "${fluentd_gcp_yaml}"
   sed -i -e "s@{{ fluentd_gcp_yaml_version }}@${fluentd_gcp_yaml_version}@g" "${fluentd_gcp_scaler_yaml}"
-  fluentd_gcp_version="${FLUENTD_GCP_VERSION:-1.6.8}"
+  fluentd_gcp_version="${FLUENTD_GCP_VERSION:-1.6.17}"
   sed -i -e "s@{{ fluentd_gcp_version }}@${fluentd_gcp_version}@g" "${fluentd_gcp_yaml}"
   update-daemon-set-prometheus-to-sd-parameters ${fluentd_gcp_yaml}
   start-fluentd-resource-update ${fluentd_gcp_yaml}

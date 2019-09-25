@@ -53,7 +53,6 @@ type eventKey struct {
 	action              string
 	reason              string
 	reportingController string
-	reportingInstance   string
 	regarding           corev1.ObjectReference
 	related             corev1.ObjectReference
 }
@@ -111,7 +110,9 @@ func (e *eventBroadcasterImpl) refreshExistingEventSeries() {
 	for isomorphicKey, event := range e.eventCache {
 		if event.Series != nil {
 			if recordedEvent, retry := recordEvent(e.sink, event); !retry {
-				e.eventCache[isomorphicKey] = recordedEvent
+				if recordedEvent != nil {
+					e.eventCache[isomorphicKey] = recordedEvent
+				}
 			}
 		}
 	}
@@ -262,7 +263,6 @@ func getKey(event *v1beta1.Event) eventKey {
 		action:              event.Action,
 		reason:              event.Reason,
 		reportingController: event.ReportingController,
-		reportingInstance:   event.ReportingInstance,
 		regarding:           event.Regarding,
 	}
 	if event.Related != nil {

@@ -27,14 +27,13 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientset "k8s.io/client-go/kubernetes"
-	"k8s.io/kubernetes/pkg/util/system"
 	e2ekubelet "k8s.io/kubernetes/test/e2e/framework/kubelet"
 	e2elog "k8s.io/kubernetes/test/e2e/framework/log"
-	e2emetrics "k8s.io/kubernetes/test/e2e/framework/metrics"
+	"k8s.io/kubernetes/test/e2e/system"
 )
 
 // ResourceConstraint is a struct to hold constraints.
@@ -74,7 +73,7 @@ func (s *ResourceUsageSummary) PrintHumanReadable() string {
 
 // PrintJSON prints resource usage summary in JSON.
 func (s *ResourceUsageSummary) PrintJSON() string {
-	return e2emetrics.PrettyPrintJSON(*s)
+	return PrettyPrintJSON(*s)
 }
 
 // SummaryKind returns string of ResourceUsageSummary
@@ -280,10 +279,10 @@ func NewResourceUsageGatherer(c clientset.Interface, options ResourceGathererOpt
 	}
 	dnsNodes := make(map[string]bool)
 	for _, pod := range pods.Items {
-		if (options.Nodes == MasterNodes) && !system.IsMasterNode(pod.Spec.NodeName) {
+		if (options.Nodes == MasterNodes) && !system.DeprecatedMightBeMasterNode(pod.Spec.NodeName) {
 			continue
 		}
-		if (options.Nodes == MasterAndDNSNodes) && !system.IsMasterNode(pod.Spec.NodeName) && pod.Labels["k8s-app"] != "kube-dns" {
+		if (options.Nodes == MasterAndDNSNodes) && !system.DeprecatedMightBeMasterNode(pod.Spec.NodeName) && pod.Labels["k8s-app"] != "kube-dns" {
 			continue
 		}
 		for _, container := range pod.Status.InitContainerStatuses {
@@ -303,7 +302,7 @@ func NewResourceUsageGatherer(c clientset.Interface, options ResourceGathererOpt
 	}
 
 	for _, node := range nodeList.Items {
-		if options.Nodes == AllNodes || system.IsMasterNode(node.Name) || dnsNodes[node.Name] {
+		if options.Nodes == AllNodes || system.DeprecatedMightBeMasterNode(node.Name) || dnsNodes[node.Name] {
 			g.workerWg.Add(1)
 			g.workers = append(g.workers, resourceGatherWorker{
 				c:                           c,
